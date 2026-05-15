@@ -75,6 +75,45 @@ function formatRelativeDate(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
+function sanitizeFilename(name) {
+  return (name || "untitled").replace(/[^\w\-]+/g, "_").slice(0, 60);
+}
+
+function downloadProjectJSON(project) {
+  const payload = { __type: "pixelchart-project-v1", ...project };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = sanitizeFilename(project.name) + ".pixelchart.json";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
+}
+
+function readProjectFile(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = (e) => {
+      try {
+        const obj = JSON.parse(e.target.result);
+        if (obj.__type && obj.__type !== "pixelchart-project-v1") {
+          return reject(new Error("Not a Pixel Chart file"));
+        }
+        if (!obj.imageSrc || !Array.isArray(obj.palette) || !Array.isArray(obj.indices)) {
+          return reject(new Error("File is missing required fields"));
+        }
+        resolve(obj);
+      } catch (err) { reject(err); }
+    };
+    r.onerror = () => reject(r.error || new Error("Read failed"));
+    r.readAsText(file);
+  });
+}
+
 function loadImageFromFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -187,7 +226,37 @@ function ProjectsDialog({ currentProjectId, currentProjectName, getProjectSnapsh
   const [projects, setProjects] = useState(() => listProjects());
   const [name, setName] = useState(currentProjectName || "");
   const [error, setError] = useState("");
+  const importInputRef = useRef(null);
   const refresh = () => setProjects(listProjects());
+
+  const handleImportClick = () => {
+    if (importInputRef.current) importInputRef.current.click();
+  };
+  const handleImportFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const obj = await readProjectFile(file);
+      // Strip server-side fields so the import behaves like a fresh, unsaved
+      // project. The user can press Save to add it to the library.
+      const { __type, id, savedAt, ...rest } = obj;
+      const proposedName = rest.name || file.name.replace(/\.[^.]*$/, "");
+      await onLoad({ ...rest, id: null, name: proposedName });
+      onClose();
+    } catch (err) {
+      setError("Couldn't import: " + err.message);
+    }
+  };
+
+  const handleExport = (proj) => {
+    downloadProjectJSON(proj);
+  };
+  const handleExportCurrent = () => {
+    const snap = getProjectSnapshot();
+    if (!snap) { setError("Nothing to export yet."); return; }
+    downloadProjectJSON({ ...snap, name: (name || currentProjectName || "untitled").trim() || "untitled" });
+  };
 
   const handleSaveAs = (overwriteId) => {
     const trimmed = (name || "").trim() || "Untitled";
@@ -222,7 +291,7 @@ function ProjectsDialog({ currentProjectId, currentProjectName, getProjectSnapsh
         <p>Save your current chart and pick it back up later. Saved locally in this browser.</p>
 
         <div className="section-label">Save current state</div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
           <input
             className="text-input"
             placeholder="Project name"
@@ -237,6 +306,27 @@ function ProjectsDialog({ currentProjectId, currentProjectName, getProjectSnapsh
           {canOverwrite && (
             <button className="btn" onClick={() => handleSaveAs(null)} title="Save as a separate copy">Save copy</button>
           )}
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+          <button className="btn ghost" onClick={handleExportCurrent} title="Download a .json file of the current project">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M6 1.5V8M6 8L3.5 5.5M6 8L8.5 5.5M2 10.5H10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Export to file…
+          </button>
+          <button className="btn ghost" onClick={handleImportClick} title="Load a project from a .json file">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M6 10.5V4M6 4L3.5 6.5M6 4L8.5 6.5M2 1.5H10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Import from file…
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleImportFile}
+            style={{ display: "none" }}
+          />
         </div>
         {error && <div style={{ fontSize: 12, color: "var(--accent)", marginBottom: 6 }}>{error}</div>}
 
@@ -258,6 +348,11 @@ function ProjectsDialog({ currentProjectId, currentProjectName, getProjectSnapsh
                 </div>
                 <div style={{ display: "flex", gap: 4 }}>
                   <button className="btn" onClick={() => onLoad(p)}>Load</button>
+                  <button className="icon-btn" title="Export to file" onClick={() => handleExport(p)} style={{ width: 28, height: 28 }}>
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M6 1.5V8M6 8L3.5 5.5M6 8L8.5 5.5M2 10.5H10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </button>
                   <button className="icon-btn" title="Delete" onClick={() => handleDelete(p.id, p.name)} style={{ width: 28, height: 28 }}>
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                       <path d="M3 3L9 9M9 3L3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
@@ -271,7 +366,7 @@ function ProjectsDialog({ currentProjectId, currentProjectName, getProjectSnapsh
 
         <div className="picker-actions" style={{ marginTop: 14 }}>
           <div style={{ flex: 1, fontSize: 11, color: "var(--ink-3)" }}>
-            {sorted.length} saved · stored in this browser only
+            {sorted.length} saved in this browser · export to share across devices
           </div>
           <button className="btn" onClick={() => onClose()}>Close</button>
         </div>

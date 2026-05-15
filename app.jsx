@@ -1446,6 +1446,52 @@ function App() {
     setPicker(null);
   };
 
+  // Shuffle the palette: keep the same set of colors but permute which color
+  // each palette index maps to. Net effect: every cell ends up a different
+  // color (drawn from the existing palette), without changing the shape of
+  // the chart.
+  const handleShufflePalette = () => {
+    if (palette.length < 2) return;
+    // Build a derangement so no entry stays in place.
+    const k = palette.length;
+    const perm = Array.from({ length: k }, (_, i) => i);
+    let attempts = 0;
+    while (attempts < 200) {
+      for (let i = k - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [perm[i], perm[j]] = [perm[j], perm[i]];
+      }
+      if (perm.every((v, i) => v !== i)) break;
+      attempts++;
+    }
+    const newPalette = perm.map(i => palette[i]);
+    setPalette(newPalette);
+  };
+
+  // Reapply palette by tone: re-pixelate the source image and assign each
+  // cell to its nearest current-palette color in RGB space. Useful when you've
+  // shuffled colors and want them to land back on tonally-appropriate cells.
+  const handleReapplyByTone = () => {
+    if (!image || !palette.length || pixelWidth <= 0 || pixelHeight <= 0) return;
+    const data = pixelate(image, pixelWidth, pixelHeight, cropX, cropY, cropW, cropH);
+    // Sort the palette by luminance (light → dark) so the mapping is stable
+    // even when the palette was shuffled.
+    const lumA = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    const sortedPalette = [...palette].sort((a, b) => lumA(b) - lumA(a));
+    const idx = remapToPalette(data, sortedPalette);
+    // Remap from sorted-palette indices back to the current palette order.
+    const lookup = new Uint8Array(sortedPalette.length);
+    sortedPalette.forEach((c, i) => {
+      const j = palette.findIndex(p => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
+      lookup[i] = j;
+    });
+    const newIndices = new Uint8Array(idx.length);
+    for (let i = 0; i < idx.length; i++) newIndices[i] = lookup[idx[i]];
+    setIndices(newIndices);
+    // Clear isolation/finish state because cell colors changed beneath them.
+    setFinishedSet(new Set());
+  };
+
   const onPaletteSwatchPick = (paletteIdx) => {
     setSelectedPaletteIdx(paletteIdx);
     setPicker({ fromIndex: paletteIdx });
@@ -2143,7 +2189,33 @@ function App() {
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 3L8 6L4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </button>
           <div className="section">
-            <div className="section-label">Palette</div>
+            <div className="section-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Palette</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  className="icon-btn"
+                  title="Reapply by tone — reassigns each cell to the closest matching color from the palette based on the source image"
+                  onClick={handleReapplyByTone}
+                  disabled={palette.length < 2 || !image}
+                  style={{ textTransform: "none", letterSpacing: 0 }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <path d="M3 1.5L1.5 3M3 1.5L4.5 3M3 1.5V7C3 8.66 4.34 10 6 10C7.66 10 9 8.66 9 7M9 10.5L10.5 9M9 10.5L7.5 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+                <button
+                  className="icon-btn"
+                  title="Shuffle colors — keeps the palette but reassigns which color goes where"
+                  onClick={handleShufflePalette}
+                  disabled={palette.length < 2}
+                  style={{ textTransform: "none", letterSpacing: 0 }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <path d="M1 3H3.5L8 9H11M11 9L9 7M11 9L9 11M1 9H3.5L5 7M11 3H8L7 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
             <div className="palette-list">
               {palette.map((p, i) => {
                 const total = paletteCounts[i] || 0;

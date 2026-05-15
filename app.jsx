@@ -43,6 +43,7 @@ function readableTextColor(rgb) {
 // ---- Project storage (localStorage) -----------------------------------------
 
 const STORAGE_KEY = "pixelchart.projects";
+const DRAFT_KEY = "pixelchart.draft";
 
 function listProjects() {
   try {
@@ -62,6 +63,21 @@ function deleteProjectFromStorage(id) {
   const all = listProjects();
   delete all[id];
   writeProjects(all);
+}
+function readDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function writeDraft(draft) {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    return true;
+  } catch { return false; }
+}
+function clearDraft() {
+  localStorage.removeItem(DRAFT_KEY);
 }
 function newProjectId() {
   return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
@@ -170,7 +186,7 @@ function makeDemoImage() {
 // -----------------------------------------------------------------------------
 // Color Picker dialog
 
-function ColorPickerDialog({ from, palette, onPick, onCancel }) {
+function ColorPickerDialog({ from, palette, onPick, onCancel, title, subtitle, confirmLabel }) {
   const [custom, setCustom] = useState(rgbToHex(from));
   const presets = [
     "#ffffff", "#e6e2da", "#8a8580", "#1a1a1a",
@@ -181,8 +197,8 @@ function ColorPickerDialog({ from, palette, onPick, onCancel }) {
   return (
     <div className="picker-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="picker">
-        <h3>Recolor</h3>
-        <p>Every pixel using the source color will switch to the new color.</p>
+        <h3>{title || "Recolor"}</h3>
+        <p>{subtitle || "Every pixel using the source color will switch to the new color."}</p>
         <div className="from-to">
           <div className="preview" style={{ background: rgbToHex(from) }}>
             <span>from</span>
@@ -211,7 +227,35 @@ function ColorPickerDialog({ from, palette, onPick, onCancel }) {
           </label>
           <div className="right">
             <button className="btn" onClick={onCancel}>Cancel</button>
-            <button className="btn primary" onClick={() => onPick(hexToRgb(custom))}>Apply</button>
+            <button className="btn primary" onClick={() => onPick(hexToRgb(custom))}>{confirmLabel || "Apply"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Small confirm dialog used by "New" when the current project has unsaved work.
+
+function ConfirmDialog({ title, message, choices, onClose }) {
+  return (
+    <div className="picker-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="picker" style={{ minWidth: 380, maxWidth: 460 }}>
+        <h3>{title}</h3>
+        <p style={{ marginBottom: 16 }}>{message}</p>
+        <div className="picker-actions">
+          <div style={{ flex: 1 }} />
+          <div className="right" style={{ flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {choices.map((c, i) => (
+              <button
+                key={i}
+                className={"btn" + (c.kind === "primary" ? " primary" : "") + (c.kind === "ghost" ? " ghost" : "")}
+                onClick={() => { c.onClick && c.onClick(); }}
+              >
+                {c.label}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -528,9 +572,10 @@ function Cropper({ image, cropX, cropY, cropW, cropH, onChange, onFull, isolated
 function PixelCanvas({
   palette, indices, gridW, gridH, cellSize,
   numberStyle, hideFinished, finishedSet,
-  isolatedRow, tool, runNums,
-  rectPreview, spaceDown, onPanStart,
+  isolatedRow, peekNeighbors, tool, runNums,
+  rectPreview, onPanStart,
   showArrows, firstRowFrom,
+  lastMarked,
   onCellDown, onCellEnter, onCellUp,
 }) {
   const canvasRef = useRef(null);
@@ -553,24 +598,29 @@ function PixelCanvas({
 
     // Fill cells
     for (let y = 0; y < gridH; y++) {
-      const rowVisible = isolatedRow === null || isolatedRow === y;
+      const a = rowAlpha(y);
+      if (a <= 0) continue;
+      ctx.globalAlpha = a;
       for (let x = 0; x < gridW; x++) {
         const i = y * gridW + x;
         const isFinished = finishedSet.has(i);
         if (hideFinished && isFinished) continue;
-        if (!rowVisible) continue;
         const c = palette[indices[i]];
         ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
         ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
       }
+      ctx.globalAlpha = 1;
     }
 
     // Finished marks (hatching) — drawn above fill, beneath gridlines.
-    // Hatches are clipped to each cell so adjacent finished cells stay visually distinct.
+    // Only the isolated row (or every row when not isolating) shows hatching;
+    // peek-only neighbor rows remain in their plain colors for reference.
     if (!hideFinished) {
       for (let y = 0; y < gridH; y++) {
-        const rowVisible = isolatedRow === null || isolatedRow === y;
-        if (!rowVisible) continue;
+        if (isolatedRow !== null && y !== isolatedRow) continue;
+        const a = rowAlpha(y);
+        if (a <= 0) continue;
+        ctx.globalAlpha = a;
         for (let x = 0; x < gridW; x++) {
           const i = y * gridW + x;
           if (!finishedSet.has(i)) continue;
@@ -579,11 +629,11 @@ function PixelCanvas({
           ctx.beginPath();
           ctx.rect(x * cellSize, y * cellSize, cellSize, cellSize);
           ctx.clip();
-          // White wash for legibility
-          ctx.globalAlpha = 0.55;
+          // White wash for legibility (respect row alpha).
+          ctx.globalAlpha = 0.55 * a;
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
-          ctx.globalAlpha = 1;
+          ctx.globalAlpha = a;
           // Diagonal stripes
           ctx.strokeStyle = "rgba(26,26,26,0.55)";
           ctx.lineWidth = Math.max(1, cellSize * 0.06);
@@ -639,6 +689,22 @@ function PixelCanvas({
       );
     }
 
+    // Cursor frame for the last-marked / selected cell (mark mode, or any time
+    // a cell has been picked while no tool is active).
+    if (lastMarked && (tool === "finish" || tool === null)) {
+      const cx = lastMarked.x * cellSize;
+      const cy = lastMarked.y * cellSize;
+      ctx.save();
+      ctx.strokeStyle = "oklch(0.62 0.17 35)";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(cx + 1.5, cy + 1.5, cellSize - 3, cellSize - 3);
+      // Inner highlight so it stands out on dark cells too.
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + 0.5, cy + 0.5, cellSize - 1, cellSize - 1);
+      ctx.restore();
+    }
+
     // Numbers — three modes
     if (numberStyle === "per-pixel" && cellSize >= 12) {
       const fontPx = Math.max(8, Math.floor(cellSize * 0.5));
@@ -646,14 +712,20 @@ function PixelCanvas({
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       for (let y = 0; y < gridH; y++) {
-        const rowVisible = isolatedRow === null || isolatedRow === y;
-        if (!rowVisible) continue;
+        // Numbers only on the isolated row (or everywhere when not isolating).
+        if (isolatedRow !== null && y !== isolatedRow) continue;
+        const a = rowAlpha(y);
+        if (a <= 0) continue;
+        ctx.globalAlpha = a;
         for (let x = 0; x < gridW; x++) {
           const i = y * gridW + x;
           if (hideFinished && finishedSet.has(i)) continue;
           const c = palette[indices[i]];
-          const txt = finishedSet.has(i) ? "rgba(26,26,26,0.4)" : readableTextColor(c);
-          ctx.fillStyle = txt;
+          // Finished cells get a white wash; compute text color against the blended shade.
+          const eff = finishedSet.has(i)
+            ? [Math.round(c[0]*0.45 + 140), Math.round(c[1]*0.45 + 140), Math.round(c[2]*0.45 + 140)]
+            : c;
+          ctx.fillStyle = readableTextColor(eff);
           ctx.fillText(
             String(runNums[i]),
             x * cellSize + cellSize / 2,
@@ -663,15 +735,14 @@ function PixelCanvas({
       }
     } else if (numberStyle === "group-total") {
       // For each visible row, compute color runs and place one number per run.
-      // Isolated row: place number ABOVE the row (or BELOW if the row is at top).
-      // Non-isolated: place number inside the middle cell of each run.
-      const isolated = isolatedRow !== null;
-      const totalFont = isolated
-        ? Math.max(12, Math.floor(cellSize * 0.85))
-        : Math.max(9, Math.floor(cellSize * 0.55));
+      // Numbers always render inside the middle cell of each color run.
+      const totalFont = Math.max(9, Math.floor(cellSize * 0.55));
       for (let y = 0; y < gridH; y++) {
-        const rowVisible = isolatedRow === null || isolatedRow === y;
-        if (!rowVisible) continue;
+        // Total-labels only on the isolated row (or everywhere when not isolating).
+        if (isolatedRow !== null && y !== isolatedRow) continue;
+        const a = rowAlpha(y);
+        if (a <= 0) continue;
+        ctx.globalAlpha = a;
         // Compute runs for this row
         let prev = -1, runStart = 0;
         const runs = [];
@@ -683,7 +754,7 @@ function PixelCanvas({
             runStart = xx;
           }
         }
-        if (isolated) {
+        if (false) {
           // Above the row, unless it's the top row — then below.
           const above = y > 0;
           const labelY = above
@@ -720,7 +791,10 @@ function PixelCanvas({
             const i = y * gridW + mid;
             if (hideFinished && finishedSet.has(i)) continue;
             const c = palette[r.colorIdx];
-            ctx.fillStyle = finishedSet.has(i) ? "rgba(26,26,26,0.4)" : readableTextColor(c);
+            const eff = finishedSet.has(i)
+              ? [Math.round(c[0]*0.45 + 140), Math.round(c[1]*0.45 + 140), Math.round(c[2]*0.45 + 140)]
+              : c;
+            ctx.fillStyle = readableTextColor(eff);
             // Offset slightly when len is even so number isn't between two cells
             const offset = r.len % 2 === 0 ? cellSize * 0.5 : cellSize / 2;
             ctx.fillText(
@@ -748,7 +822,7 @@ function PixelCanvas({
       ctx.strokeRect(rx + 0.75, ry + 0.75, rw - 1.5, rh - 1.5);
       ctx.restore();
     }
-  }, [palette, indices, gridW, gridH, cellSize, numberStyle, hideFinished, finishedSet, isolatedRow, runNums, rectPreview]);
+  }, [palette, indices, gridW, gridH, cellSize, numberStyle, hideFinished, finishedSet, isolatedRow, peekNeighbors, runNums, rectPreview, tool, lastMarked]);
 
   const cellFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -763,8 +837,8 @@ function PixelCanvas({
 
   const handleMouseDown = (e) => {
     if (!indices) return;
-    // Middle-button or space-held = pan (delegate to parent).
-    if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    // Middle-button = pan (delegate to parent).
+    if (e.button === 1) {
       e.preventDefault();
       onPanStart && onPanStart(e);
       return;
@@ -792,26 +866,42 @@ function PixelCanvas({
     window.addEventListener("mouseup", up);
   };
 
-  const cursorStyle = spaceDown ? "grab"
-    : !tool ? "default"
+  const cursorStyle = !tool ? "default"
     : tool === "isolate" ? "crosshair"
     : tool === "finish" ? "cell" : "pointer";
 
   // Row direction arrows (for tapestry crochet etc.). startsRight(y) returns
   // whether row y starts on the right (and thus reads right-to-left).
+  // Per-row opacity given the current isolation + peek state.
+  // 1 = full, 0 = hidden. Peek shows ±1 row at full color.
+  const rowAlpha = (y) => {
+    if (isolatedRow === null) return 1;
+    const dist = Math.abs(y - isolatedRow);
+    if (dist === 0) return 1;
+    if (peekNeighbors && dist === 1) return 1;
+    return 0;
+  };
+  // Whether row y starts on the right (and thus reads right-to-left).
   const startsRight = (y) => ((y % 2 === 0) === (firstRowFrom === "right"));
+  // Visual alpha for arrows: keeps them faintly visible even when peek is off,
+  // and full for an adjacent row when peek is on.
+  const arrowAlpha = (y) => {
+    if (isolatedRow === null) return 1;
+    if (y === isolatedRow) return 1;
+    if (peekNeighbors && Math.abs(y - isolatedRow) === 1) return 1;
+    return 0.12;
+  };
   const arrowPx = Math.max(12, Math.floor(cellSize * 0.55));
   const arrowsLeft = showArrows && (
     <div className="row-arrows">
       {Array.from({ length: gridH }, (_, y) => {
         const sr = startsRight(y);
-        const visible = isolatedRow === null || y === isolatedRow;
         const isIso = isolatedRow === y;
         return (
           <div
             key={y}
             className={"arrow-slot" + (isIso ? " iso" : "")}
-            style={{ width: cellSize, height: cellSize, opacity: visible ? 1 : 0.12 }}
+            style={{ width: cellSize, height: cellSize, opacity: arrowAlpha(y) }}
           >
             {!sr && (
               <svg width={arrowPx} height={arrowPx} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -827,13 +917,12 @@ function PixelCanvas({
     <div className="row-arrows">
       {Array.from({ length: gridH }, (_, y) => {
         const sr = startsRight(y);
-        const visible = isolatedRow === null || y === isolatedRow;
         const isIso = isolatedRow === y;
         return (
           <div
             key={y}
             className={"arrow-slot" + (isIso ? " iso" : "")}
-            style={{ width: cellSize, height: cellSize, opacity: visible ? 1 : 0.12 }}
+            style={{ width: cellSize, height: cellSize, opacity: arrowAlpha(y) }}
           >
             {sr && (
               <svg width={arrowPx} height={arrowPx} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -870,7 +959,7 @@ function App() {
   const [image, setImage] = useState(null);
   const [imageName, setImageName] = useState("demo.png");
   const [resolution, setResolution] = useState(40); // long-edge pixel count
-  const [colorCount, setColorCount] = useState(8);
+  const [colorCount, setColorCount] = useState(10);
   const [cropX, setCropX] = useState(0);
   const [cropY, setCropY] = useState(0);
   const [cropW, setCropW] = useState(0);
@@ -880,7 +969,6 @@ function App() {
   const [zoom, setZoom] = useState(1);
   const [panX, setPanX] = useState(0);
   const [panY, setPanY] = useState(0);
-  const [spaceDown, setSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const stageRef = useRef(null);
 
@@ -889,51 +977,170 @@ function App() {
   const [gridW, setGridW] = useState(0);
   const [gridH, setGridH] = useState(0);
   const [paletteCounts, setPaletteCounts] = useState([]);
+  const [maxColors, setMaxColors] = useState(256);
 
-  const [tool, setTool] = useState("recolor"); // "recolor" | "isolate" | "finish"
+  const [tool, setTool] = useState(null); // null | "recolor" | "isolate" | "finish"
   const [isolatedRow, setIsolatedRow] = useState(null);
   const [numberStyle, setNumberStyle] = useState("per-pixel"); // 'per-pixel' | 'group-total' | 'off'
   const [hideFinished, setHideFinished] = useState(false);
+  const [peekNeighbors, setPeekNeighbors] = useState(false);
+  const [lastMarked, setLastMarked] = useState(null); // {x,y} — cursor for arrow-key marking
+  const lastIsolatedRowRef = useRef(null);
+  useEffect(() => {
+    if (isolatedRow !== null) lastIsolatedRowRef.current = isolatedRow;
+  }, [isolatedRow]);
   const [finishedSet, setFinishedSet] = useState(new Set());
   const [picker, setPicker] = useState(null); // { fromIndex }
   const [selectedPaletteIdx, setSelectedPaletteIdx] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [rectPreview, setRectPreview] = useState(null); // {x0,y0,x1,y1}
-  const [countMode, setCountMode] = useState("remaining"); // 'total' | 'remaining'
-  const [showArrows, setShowArrows] = useState(false);
+  const [showArrows, setShowArrows] = useState(true);
   const [firstRowFrom, setFirstRowFrom] = useState("right"); // 'right' | 'left'
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [currentProjectName, setCurrentProjectName] = useState("");
   const [showProjectsDialog, setShowProjectsDialog] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [autosaveStatus, setAutosaveStatus] = useState("idle"); // 'idle' | 'saving' | 'saved'
+  const [lastSavedSignature, setLastSavedSignature] = useState(null);
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [floatingState, setFloatingState] = useState("open"); // 'open' | 'minimized' | 'hidden'
   const dragStateRef = useRef(null);
+  const draftRestoredRef = useRef(false);
+  const autosaveTimerRef = useRef(null);
 
-  // Load demo image on mount.
+  // Load demo image on mount — unless there's an autosaved draft to restore.
   useEffect(() => {
-    makeDemoImage().then((img) => setImage(img));
+    const draft = readDraft();
+    if (draft && draft.imageSrc) {
+      // Restore the saved draft
+      const img = new Image();
+      img.onload = () => {
+        prevImg.current = img;
+        lastQuant.current = { sig: `${draft.imageSrc.length}:${draft.colorCount}` };
+        setImage(img);
+        setImageName(draft.imageName || "untitled");
+        setResolution(draft.resolution);
+        setColorCount(draft.colorCount);
+        setCropX(draft.cropX); setCropY(draft.cropY);
+        setCropW(draft.cropW); setCropH(draft.cropH);
+        setPalette(draft.palette);
+        setIndices(new Uint8Array(draft.indices));
+        setGridW(draft.gridW); setGridH(draft.gridH);
+        setFinishedSet(new Set(draft.finished || []));
+        setIsolatedRow(draft.isolatedRow ?? null);
+        setNumberStyle(draft.numberStyle || "per-pixel");
+        setHideFinished(!!draft.hideFinished);
+        setShowArrows(draft.showArrows !== undefined ? !!draft.showArrows : true);
+        setFirstRowFrom(draft.firstRowFrom || "right");
+        setCurrentProjectId(draft.currentProjectId || null);
+        setCurrentProjectName(draft.currentProjectName || "");
+        setLastSavedSignature(draft.lastSavedSignature || null);
+        draftRestoredRef.current = true;
+      };
+      img.src = draft.imageSrc;
+    } else {
+      makeDemoImage().then((img) => setImage(img));
+      draftRestoredRef.current = true;
+    }
   }, []);
 
-  // Hold space to enable pan-on-drag in the chart stage.
+  // Spacebar toggles the floating toolbar visibility.
+  // I and M toggle tools; Esc deselects.
+  // When isolating, ArrowUp/Down move the isolated row.
   useEffect(() => {
     const down = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.code === "Space" && !e.repeat) {
-        // Don't hijack space when typing in an input.
-        const t = e.target;
-        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
         e.preventDefault();
-        setSpaceDown(true);
+        setFloatingState(s => s === "open" ? "hidden" : "open");
+      } else if (e.key === "i" || e.key === "I") {
+        e.preventDefault();
+        if (isolatedRow !== null) {
+          setIsolatedRow(null);
+          if (tool === "isolate") setTool(null);
+        } else {
+          // Prefer the selected cell's row; otherwise the last isolated row; otherwise row 0.
+          const target = lastMarked ? lastMarked.y : (lastIsolatedRowRef.current ?? 0);
+          setIsolatedRow(target);
+          setTool("isolate");
+        }
+      } else if (e.key === "m" || e.key === "M") {
+        e.preventDefault();
+        setTool(t => t === "finish" ? null : "finish");
+      } else if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        setTool(t => t === "recolor" ? null : "recolor");
+      } else if (e.key === "p" || e.key === "P") {
+        e.preventDefault();
+        setPeekNeighbors(v => !v);
+      } else if (e.key === "Escape") {
+        setTool(null);
+        setIsolatedRow(null);
+      } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        const dy = e.key === "ArrowUp" ? -1 : 1;
+        if (tool === "finish" && isolatedRow !== null) {
+          // Move isolation AND the cursor to the new row.
+          e.preventDefault();
+          const newRow = Math.max(0, Math.min(gridH - 1, isolatedRow + dy));
+          setIsolatedRow(newRow);
+          if (lastMarked) setLastMarked({ x: lastMarked.x, y: newRow });
+        } else if (tool === "finish" && lastMarked) {
+          // Move the cursor freely up/down within the chart.
+          e.preventDefault();
+          const newY = Math.max(0, Math.min(gridH - 1, lastMarked.y + dy));
+          setLastMarked({ x: lastMarked.x, y: newY });
+        } else if (isolatedRow !== null) {
+          // Default isolation navigation.
+          e.preventDefault();
+          setIsolatedRow(r => Math.max(0, Math.min(gridH - 1, (r ?? 0) + dy)));
+        }
+      } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && tool === "finish") {
+        // If no cursor yet, seed it at the first cell of the isolated row.
+        if (!lastMarked) {
+          if (isolatedRow === null) return;
+          e.preventDefault();
+          const y = isolatedRow;
+          const rowGoesLTR = showArrows ? !((y % 2 === 0) === (firstRowFrom === "right")) : true;
+          const firstX = rowGoesLTR ? 0 : gridW - 1;
+          setFinishedSet(prev => {
+            const next = new Set(prev);
+            next.add(y * gridW + firstX);
+            return next;
+          });
+          setLastMarked({ x: firstX, y });
+          return;
+        }
+        e.preventDefault();
+        const { x, y } = lastMarked;
+        const rowGoesLTR = showArrows ? !((y % 2 === 0) === (firstRowFrom === "right")) : true;
+        const forward = rowGoesLTR ? "right" : "left";
+        const pressed = e.key === "ArrowRight" ? "right" : "left";
+        if (pressed === forward) {
+          const nx = forward === "right" ? x + 1 : x - 1;
+          if (nx < 0 || nx >= gridW) return;
+          setFinishedSet(prev => {
+            const next = new Set(prev);
+            next.add(y * gridW + nx);
+            return next;
+          });
+          setLastMarked({ x: nx, y });
+        } else {
+          setFinishedSet(prev => {
+            const next = new Set(prev);
+            next.delete(y * gridW + x);
+            return next;
+          });
+          const bx = forward === "right" ? x - 1 : x + 1;
+          setLastMarked(bx >= 0 && bx < gridW ? { x: bx, y } : null);
+        }
       }
     };
-    const up = (e) => { if (e.code === "Space") setSpaceDown(false); };
-    const blur = () => setSpaceDown(false);
     window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    window.addEventListener("blur", blur);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-      window.removeEventListener("blur", blur);
-    };
-  }, []);
+    return () => window.removeEventListener("keydown", down);
+  }, [tool, isolatedRow, gridH, gridW, lastMarked, showArrows, firstRowFrom]);
 
   // Wheel handler: ctrl/cmd + wheel (or trackpad pinch) zooms; plain wheel pans.
   // Bound directly (not via React onWheel) so we can use { passive: false } and
@@ -1006,8 +1213,10 @@ function App() {
   };
 
   const onStageMouseDown = (e) => {
-    // Middle button anywhere, or space-held left button on the dotted bg = pan.
-    if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    // Middle button anywhere = pan.
+    if (e.button === 1) { onPanStart(e); return; }
+    // Left-click on empty stage background (not on the chart) = pan.
+    if (e.button === 0 && e.target === e.currentTarget) {
       onPanStart(e);
     }
   };
@@ -1059,13 +1268,28 @@ function App() {
   useEffect(() => {
     if (!image || pixelWidth <= 0 || pixelHeight <= 0 || cropW <= 0 || cropH <= 0) return;
     const data = pixelate(image, pixelWidth, pixelHeight, cropX, cropY, cropW, cropH);
-    const sig = `${image.src.length}:${colorCount}`;
+    // Count distinct colors in the downsampled image — quantizing to more than
+    // that doesn't add detail, so we cap colorCount to it.
+    const uniq = new Set();
+    const d = data.data;
+    for (let i = 0; i < pixelWidth * pixelHeight; i++) {
+      const key = (d[i*4] << 16) | (d[i*4+1] << 8) | d[i*4+2];
+      uniq.add(key);
+      if (uniq.size > 256) break;
+    }
+    const uniqueCount = uniq.size;
+    setMaxColors(uniqueCount);
+    const effectiveCount = Math.min(colorCount, uniqueCount);
+    // Snap colorCount down if the user's target exceeds what's available.
+    if (colorCount > uniqueCount) setColorCount(uniqueCount);
+
+    const sig = `${image.src.length}:${effectiveCount}`;
     if (lastQuant.current.sig === sig && palette.length > 0) {
       const idx = remapToPalette(data, palette);
       setGridW(pixelWidth); setGridH(pixelHeight);
       setIndices(idx);
     } else {
-      const { palette: pal, indices: idx, counts } = kmeans(data, colorCount);
+      const { palette: pal, indices: idx, counts } = kmeans(data, effectiveCount);
       setGridW(pixelWidth); setGridH(pixelHeight);
       setPalette(pal);
       setIndices(idx);
@@ -1115,8 +1339,13 @@ function App() {
 
   const handleCellDown = (x, y, e) => {
     if (!indices) return;
-    if (!tool) return; // No tool selected — ignore clicks.
     const i = y * gridW + x;
+    if (!tool) {
+      // No tool selected — set a cursor so the user can press I to isolate this row
+      // or M to start marking from here.
+      setLastMarked({ x, y });
+      return;
+    }
     if (tool === "recolor") {
       setPicker({ fromIndex: indices[i] });
       return;
@@ -1126,6 +1355,8 @@ function App() {
       return;
     }
     if (tool === "finish") {
+      // When a row is isolated, only allow marking inside that row.
+      if (isolatedRow !== null && y !== isolatedRow) return;
       const action = finishedSet.has(i) ? "unmark" : "mark";
       if (e.shiftKey) {
         // Rectangle select: don't toggle the starting cell yet; apply on mouseup.
@@ -1139,6 +1370,8 @@ function App() {
           if (action === "mark") next.add(i); else next.delete(i);
           return next;
         });
+        // Update the arrow-key cursor.
+        setLastMarked(action === "mark" ? { x, y } : null);
       }
     }
   };
@@ -1146,6 +1379,8 @@ function App() {
   const handleCellEnter = (x, y, e) => {
     const ds = dragStateRef.current;
     if (!ds) return;
+    // When a row is isolated, clamp drag to that row.
+    if (isolatedRow !== null) y = isolatedRow;
     if (ds.mode === "paint") {
       const i = y * gridW + x;
       if (ds.touched.has(i)) return;
@@ -1155,6 +1390,7 @@ function App() {
         if (ds.action === "mark") next.add(i); else next.delete(i);
         return next;
       });
+      if (ds.action === "mark") setLastMarked({ x, y });
     } else if (ds.mode === "rect") {
       ds.x1 = x; ds.y1 = y;
       setRectPreview({ x0: ds.x0, y0: ds.y0, x1: x, y1: y });
@@ -1215,6 +1451,43 @@ function App() {
     setPicker({ fromIndex: paletteIdx });
   };
 
+  // Add a brand-new palette color (the user picks it first — no cells are
+  // assigned to it until they recolor manually).
+  const [showAddPicker, setShowAddPicker] = useState(false);
+  const handleAddPaletteColor = (rgb) => {
+    // Don't duplicate an existing entry.
+    const existing = palette.findIndex(p => p[0] === rgb[0] && p[1] === rgb[1] && p[2] === rgb[2]);
+    if (existing !== -1) { setShowAddPicker(false); setSelectedPaletteIdx(existing); return; }
+    setPalette([...palette, rgb]);
+    setShowAddPicker(false);
+  };
+
+  // Delete a palette entry. Any cells using it get remapped to the nearest
+  // remaining color in RGB space.
+  const handleDeletePaletteColor = (paletteIdx) => {
+    if (palette.length <= 2) return;
+    const target = palette[paletteIdx];
+    const remaining = palette.filter((_, i) => i !== paletteIdx);
+    // For each remaining color, compute distance to target so we can pick the nearest.
+    let bestJ = 0, bestD = Infinity;
+    remaining.forEach((c, j) => {
+      const dr = c[0] - target[0], dg = c[1] - target[1], db = c[2] - target[2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < bestD) { bestD = d; bestJ = j; }
+    });
+    const newIndices = new Uint8Array(indices.length);
+    for (let k = 0; k < indices.length; k++) {
+      let v = indices[k];
+      if (v === paletteIdx) v = bestJ;
+      else if (v > paletteIdx) v -= 1;
+      newIndices[k] = v;
+    }
+    // Remap finished set (same logic — indices haven't shifted, only palette has).
+    setPalette(remaining);
+    setIndices(newIndices);
+    if (selectedPaletteIdx === paletteIdx) setSelectedPaletteIdx(null);
+  };
+
   // ---- Project save / load --------------------------------------------------
 
   const getProjectSnapshot = () => {
@@ -1229,10 +1502,49 @@ function App() {
       gridW, gridH,
       finished: Array.from(finishedSet),
       isolatedRow,
-      numberStyle, hideFinished, countMode,
+      numberStyle, hideFinished,
       showArrows, firstRowFrom,
     };
   };
+
+  // Cheap signature of "interesting" state, used to detect dirty / unsaved.
+  const stateSignature = useMemo(() => {
+    if (!indices) return null;
+    return JSON.stringify({
+      i: imageName,
+      r: resolution, c: colorCount,
+      cx: Math.round(cropX), cy: Math.round(cropY),
+      cw: Math.round(cropW), ch: Math.round(cropH),
+      p: palette,
+      idx: indices.length > 0 ? [indices.length, indices[0], indices[indices.length - 1], indices.reduce((a, b, k) => k % 31 === 0 ? a + b : a, 0)] : 0,
+      f: finishedSet.size,
+      ns: numberStyle, hf: hideFinished, sa: showArrows, frf: firstRowFrom,
+    });
+  }, [imageName, resolution, colorCount, cropX, cropY, cropW, cropH, palette, indices, finishedSet, numberStyle, hideFinished, showArrows, firstRowFrom]);
+
+  const isDirty = stateSignature !== null && stateSignature !== lastSavedSignature;
+
+  // Autosave draft on every state change (debounced).
+  useEffect(() => {
+    if (!draftRestoredRef.current) return;
+    if (!image || !indices || palette.length === 0) return;
+    setAutosaveStatus("saving");
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      const snap = getProjectSnapshot();
+      if (!snap) return;
+      const ok = writeDraft({
+        ...snap,
+        currentProjectId,
+        currentProjectName,
+        lastSavedSignature,
+        autosavedAt: Date.now(),
+      });
+      setAutosaveStatus(ok ? "saved" : "idle");
+    }, 450);
+    return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stateSignature, currentProjectId, currentProjectName, lastSavedSignature]);
 
   const handleLoadProject = async (p) => {
     // Decode image from data URL first.
@@ -1258,25 +1570,86 @@ function App() {
     setIsolatedRow(p.isolatedRow ?? null);
     setNumberStyle(p.numberStyle || "per-pixel");
     setHideFinished(!!p.hideFinished);
-    setCountMode(p.countMode || "remaining");
-    setShowArrows(!!p.showArrows);
+    setShowArrows(p.showArrows !== undefined ? !!p.showArrows : true);
     setFirstRowFrom(p.firstRowFrom || "right");
     setTool(null);
     setSelectedPaletteIdx(null);
     setRectPreview(null);
-    setCurrentProjectId(p.id);
-    setCurrentProjectName(p.name);
+    setCurrentProjectId(p.id || null);
+    setCurrentProjectName(p.name || "");
+    // Loaded state becomes the new "clean" baseline once signature recomputes.
+    setLastSavedSignature(null);
+    baselineAfterLoadRef.current = true;
     setShowProjectsDialog(false);
   };
 
-  const handleNewProject = () => {
+  // After a load, the new state becomes the saved baseline.
+  const baselineAfterLoadRef = useRef(false);
+  useEffect(() => {
+    if (baselineAfterLoadRef.current && stateSignature) {
+      setLastSavedSignature(stateSignature);
+      baselineAfterLoadRef.current = false;
+    }
+  }, [stateSignature]);
+
+  const startNewProject = () => {
     setCurrentProjectId(null);
     setCurrentProjectName("");
+    setLastSavedSignature(null);
+    setFinishedSet(new Set());
+    setIsolatedRow(null);
     makeDemoImage().then((img) => {
       lastQuant.current = {};
       setImage(img);
       setImageName("demo.png");
     });
+  };
+
+  const handleNewProject = () => {
+    // If nothing meaningful is loaded yet, just start fresh.
+    if (!indices) { startNewProject(); return; }
+    if (!isDirty) { startNewProject(); return; }
+
+    if (currentProjectId) {
+      // Named, saved project with unsaved changes since the last save.
+      setConfirmDialog({
+        title: `Unsaved changes to “${currentProjectName}”`,
+        message: "You have changes that haven't been saved to this project yet. Save before starting a new one?",
+        choices: [
+          { label: "Discard changes", kind: "ghost", onClick: () => { setConfirmDialog(null); startNewProject(); } },
+          { label: "Cancel", onClick: () => setConfirmDialog(null) },
+          {
+            label: "Save & continue", kind: "primary",
+            onClick: () => {
+              const snap = getProjectSnapshot();
+              if (snap) {
+                saveProjectToStorage({ ...snap, id: currentProjectId, name: currentProjectName, savedAt: Date.now() });
+              }
+              setConfirmDialog(null);
+              startNewProject();
+            }
+          },
+        ],
+      });
+    } else {
+      // Unnamed / never saved — ask whether to save (with a name) or abandon.
+      setConfirmDialog({
+        title: "Save current project?",
+        message: "This project hasn't been saved yet. Save it before starting a new one, or abandon it?",
+        choices: [
+          { label: "Abandon", kind: "ghost", onClick: () => { setConfirmDialog(null); startNewProject(); } },
+          { label: "Cancel", onClick: () => setConfirmDialog(null) },
+          {
+            label: "Save…", kind: "primary",
+            onClick: () => {
+              setConfirmDialog(null);
+              setShowProjectsDialog(true);
+              // After they save in the dialog and close, they can click New again.
+            }
+          },
+        ],
+      });
+    }
   };
 
   // Remaining (unfinished) cells per palette entry.
@@ -1378,8 +1751,13 @@ function App() {
           {image && (
             <span className="badge">
               {currentProjectName || imageName} · {gridW}×{gridH} · {palette.length} colors
+              {isDirty && currentProjectId && <span className="badge-dot" title="Unsaved changes since last save" />}
             </span>
           )}
+          <span className="autosave-indicator" title="Every change is autosaved locally">
+            <span className={"autosave-dot " + autosaveStatus} />
+            {autosaveStatus === "saving" ? "Saving…" : autosaveStatus === "saved" ? "Autosaved" : " "}
+          </span>
           <button className="btn" onClick={handleNewProject} title="Start a fresh project">New</button>
           <button className="btn" onClick={() => setShowProjectsDialog(true)}>
             Projects
@@ -1391,9 +1769,12 @@ function App() {
         </div>
       </header>
 
-      <div className="layout">
+      <div className="layout" data-left={leftOpen ? "open" : "closed"} data-right={rightOpen ? "open" : "closed"}>
         {/* LEFT PANEL */}
         <aside className="panel left">
+          <button className="panel-collapse-btn" title="Collapse panel (Esc)" onClick={() => setLeftOpen(false)}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M7.5 3L4 6L7.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
           <div className="section">
             <div className="section-label">Source</div>
             <label
@@ -1450,14 +1831,27 @@ function App() {
             <div className="control">
               <div className="control-row">
                 <span className="control-label">Colors</span>
-                <span className="control-value">{colorCount}</span>
+                <div className="number-input">
+                  <button type="button" onClick={() => setColorCount(c => Math.max(2, c - 1))} aria-label="Decrease colors">−</button>
+                  <input
+                    type="number"
+                    min="2"
+                    max={maxColors}
+                    value={colorCount}
+                    onChange={(e) => {
+                      const v = Math.max(2, Math.min(maxColors, parseInt(e.target.value || "0", 10) || 2));
+                      setColorCount(v);
+                    }}
+                  />
+                  <button type="button" disabled={colorCount >= maxColors} onClick={() => setColorCount(c => Math.min(maxColors, c + 1))} aria-label="Increase colors">+</button>
+                </div>
               </div>
-              <input
-                type="range"
-                min="2" max="24" step="1"
-                value={colorCount}
-                onChange={(e) => setColorCount(Number(e.target.value))}
-              />
+              <div style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                {colorCount >= maxColors
+                  ? <>At image max ({maxColors}). Lower the detail for fewer unique colors.</>
+                  : <>Max for this image: {maxColors}</>
+                }
+              </div>
             </div>
           </div>
 
@@ -1465,15 +1859,23 @@ function App() {
             <div className="section-label">Tool</div>
             <div className="tool-group">
               <button className={"tool" + (tool === "recolor" ? " active" : "")} onClick={() => setTool(t => t === "recolor" ? null : "recolor")}>
-                <span className="tool-name">Recolor</span>
+                <span className="tool-name">Recolor<span className="tool-key">R</span></span>
                 <span className="tool-desc">Click a pixel → remap all of that color.</span>
               </button>
-              <button className={"tool" + (tool === "isolate" ? " active" : "")} onClick={() => setTool(t => t === "isolate" ? null : "isolate")}>
-                <span className="tool-name">Isolate row</span>
+              <button className={"tool" + ((tool === "isolate" || isolatedRow !== null) ? " active" : "")} onClick={() => {
+                if (isolatedRow !== null) {
+                  setIsolatedRow(null);
+                  if (tool === "isolate") setTool(null);
+                } else {
+                  setIsolatedRow(lastMarked ? lastMarked.y : (lastIsolatedRowRef.current ?? 0));
+                  setTool("isolate");
+                }
+              }}>
+                <span className="tool-name">Isolate row<span className="tool-key">I</span></span>
                 <span className="tool-desc">Click a row to focus it, hide the rest.</span>
               </button>
               <button className={"tool" + (tool === "finish" ? " active" : "")} onClick={() => setTool(t => t === "finish" ? null : "finish")}>
-                <span className="tool-name">Mark done</span>
+                <span className="tool-name">Mark done<span className="tool-key">M</span></span>
                 <span className="tool-desc">Click, drag, or Shift-drag rect.</span>
               </button>
               <button className="tool" onClick={() => { setFinishedSet(new Set()); setIsolatedRow(null); }}>
@@ -1509,6 +1911,13 @@ function App() {
             </div>
             <div className="toggle-row">
               <div>
+                <div className="toggle-label">Peek neighboring rows <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)", padding: "1px 5px", border: "1px solid var(--line)", borderRadius: 3, marginLeft: 6 }}>P</span></div>
+                <div className="toggle-sub">When isolating, show ±1 row at full color (no numbers, no done marks).</div>
+              </div>
+              <div className={"switch" + (peekNeighbors ? " on" : "")} onClick={() => setPeekNeighbors(v => !v)} />
+            </div>
+            <div className="toggle-row">
+              <div>
                 <div className="toggle-label">Row direction arrows</div>
                 <div className="toggle-sub">Alternating row arrows for tapestry crochet.</div>
               </div>
@@ -1526,7 +1935,7 @@ function App() {
                   style={{ fontFamily: "var(--mono)", fontSize: 12, letterSpacing: 1 }}
                   title={firstRowFrom === "right" ? "Row 1 starts on the right" : "Row 1 starts on the left"}
                 >
-                  {firstRowFrom === "right" ? "← → ← →" : "→ ← → ←"}
+                  {firstRowFrom === "right" ? "← →" : "→ ←"}
                 </button>
               </div>
             )}
@@ -1535,10 +1944,20 @@ function App() {
 
         {/* CENTER STAGE */}
         <main
-          className={"stage" + (spaceDown ? " space-down" : "") + (isPanning ? " panning" : "")}
+          className={"stage" + (isPanning ? " panning" : "")}
           ref={stageRef}
           onMouseDown={onStageMouseDown}
         >
+          {!leftOpen && (
+            <button className="panel-show-btn left" title="Show left panel" onClick={() => setLeftOpen(true)}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 3L8 6L4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+          )}
+          {!rightOpen && (
+            <button className="panel-show-btn right" title="Show right panel" onClick={() => setRightOpen(true)}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M7.5 3L4 6L7.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+          )}
           {!indices && (
             <div className="stage-empty">Loading…</div>
           )}
@@ -1556,13 +1975,14 @@ function App() {
                 hideFinished={hideFinished}
                 finishedSet={finishedSet}
                 isolatedRow={isolatedRow}
+                peekNeighbors={peekNeighbors}
                 tool={tool}
                 runNums={runNums}
                 rectPreview={rectPreview}
-                spaceDown={spaceDown}
                 onPanStart={onPanStart}
                 showArrows={showArrows}
                 firstRowFrom={firstRowFrom}
+                lastMarked={lastMarked}
                 onCellDown={handleCellDown}
                 onCellEnter={handleCellEnter}
                 onCellUp={handleCellUp}
@@ -1596,7 +2016,6 @@ function App() {
                       if (finishedSet.has(isolatedRow * gridW + x)) doneInRun++;
                     }
                     const remaining = s.count - doneInRun;
-                    const displayCount = countMode === "remaining" ? remaining : s.count;
                     return (
                       <button
                         key={i}
@@ -1605,8 +2024,8 @@ function App() {
                         title={status === "done" ? "Click to unmark this run" : "Click to mark this run done"}
                       >
                         <span className="dot" style={{ background: rgbToHex(palette[s.idx]) }} />
-                        {displayCount}
-                        {countMode === "remaining" && doneInRun > 0 && status !== "done" && (
+                        {remaining}
+                        {doneInRun > 0 && status !== "done" && (
                           <span className="pill-of">/{s.count}</span>
                         )}
                         {status === "done" && <span className="check">✓</span>}
@@ -1626,6 +2045,76 @@ function App() {
             );
           })()}
 
+          {/* Floating tool palette — shows when both side panels are closed */}
+          {!leftOpen && !rightOpen && floatingState === "open" && (
+            <div className="floating-tools" onMouseDown={e => e.stopPropagation()}>
+              <button
+                className={"ftool" + (tool === "recolor" ? " active" : "")}
+                onClick={() => setTool(t => t === "recolor" ? null : "recolor")}
+                title="Recolor (R)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.5 10L9.5 3L11 4.5L4 11.5H2.5V10Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>
+                <span>Recolor</span>
+                <span className="ftool-key">R</span>
+              </button>
+              <button
+                className={"ftool" + ((tool === "isolate" || isolatedRow !== null) ? " active" : "")}
+                onClick={() => {
+                  if (isolatedRow !== null) {
+                    setIsolatedRow(null);
+                    if (tool === "isolate") setTool(null);
+                  } else {
+                    setIsolatedRow(lastMarked ? lastMarked.y : (lastIsolatedRowRef.current ?? 0));
+                    setTool("isolate");
+                  }
+                }}
+                title="Isolate row (I)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M2 7H12M2 10H12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><path d="M2 7H12" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"/></svg>
+                <span>Isolate</span>
+                <span className="ftool-key">I</span>
+              </button>
+              <button
+                className={"ftool" + (tool === "finish" ? " active" : "")}
+                onClick={() => setTool(t => t === "finish" ? null : "finish")}
+                title="Mark done (M)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.5 7.5L5.5 10.5L11.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                <span>Mark done</span>
+                <span className="ftool-key">M</span>
+              </button>
+              <div className="ftool-sep" />
+              <button
+                className="ftool ghost"
+                onClick={() => { setFinishedSet(new Set()); setIsolatedRow(null); }}
+                title="Clear done marks and isolation"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7C3 4.79 4.79 3 7 3C9.21 3 11 4.79 11 7C11 9.21 9.21 11 7 11M3 7L1 5M3 7L5 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                <span>Reset</span>
+              </button>
+              <div className="ftool-sep" />
+              <button
+                className="ftool ghost ftool-dismiss"
+                onClick={() => setFloatingState("minimized")}
+                title="Hide toolbar (× to keep the Tools button · Space to hide completely)"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M3 3L9 9M9 3L3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+                <span className="ftool-key">space</span>
+              </button>
+            </div>
+          )}
+          {!leftOpen && !rightOpen && floatingState === "minimized" && (
+            <button
+              className="floating-tools-show"
+              onClick={() => setFloatingState("open")}
+              onMouseDown={e => e.stopPropagation()}
+              title="Show tools"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M2 7H12M2 10H12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+              Tools
+            </button>
+          )}
+
           {/* Zoom controls */}
           <div className="zoom-controls">
             <button onClick={() => zoomBy(1/1.25)} title="Zoom out">−</button>
@@ -1635,29 +2124,26 @@ function App() {
 
           <div className="hintbar">
             <span className="dot" />
-            {spaceDown ? <>Drag to pan</> : (
-              <>
-                {!tool && <>No tool selected · pick one from the left</>}
-                {tool === "recolor" && <>Click any pixel to recolor every pixel of that color</>}
-                {tool === "isolate" && (isolatedRow === null ? <>Click any row to isolate it</> : <>Row {isolatedRow + 1} isolated · click again to release</>)}
-                {tool === "finish" && <>Click or drag to mark · Shift-drag to mark a rectangle</>}
-              </>
+            {!tool && <>No tool selected · press <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>I</span> or <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>M</span></>}
+            {tool === "recolor" && <>Click any pixel to recolor every pixel of that color</>}
+            {tool === "isolate" && (isolatedRow === null
+              ? <>Click any row to isolate it · <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>I</span> to exit</>
+              : <>Row {isolatedRow + 1} isolated · <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>↑</span> <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>↓</span> to move · <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>I</span> to exit</>
             )}
-            <span className="kbd" title="Hold to pan">space</span>
-            <span className="kbd" title="Pinch / Cmd+wheel to zoom">⌘+wheel</span>
+            {tool === "finish" && (lastMarked
+              ? <>Marked ({lastMarked.x + 1}, {lastMarked.y + 1}) · <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>←</span> <span className="kbd" style={{background:"transparent",border:"1px solid rgba(255,255,255,.25)"}}>→</span> to advance/unmark</>
+              : <>Click or drag to mark · Shift-drag rectangle</>
+            )}
           </div>
         </main>
 
         {/* RIGHT PANEL */}
         <aside className="panel right">
+          <button className="panel-collapse-btn right" title="Collapse panel" onClick={() => setRightOpen(false)}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 3L8 6L4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
           <div className="section">
-            <div className="section-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>Palette</span>
-              <div className="seg" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>
-                <button className={countMode === "remaining" ? "active" : ""} onClick={() => setCountMode("remaining")}>Remaining</button>
-                <button className={countMode === "total" ? "active" : ""} onClick={() => setCountMode("total")}>Total</button>
-              </div>
-            </div>
+            <div className="section-label">Palette</div>
             <div className="palette-list">
               {palette.map((p, i) => {
                 const total = paletteCounts[i] || 0;
@@ -1674,8 +2160,8 @@ function App() {
                     <div className="swatch-meta">
                       <span className="swatch-hex">{rgbToHex(p).toUpperCase()}</span>
                       <span className="swatch-count">
-                        {countMode === "remaining"
-                          ? (done > 0 ? <>{remaining}<span className="swatch-count-mute"> / {total} left</span></> : <>{total} cells</>)
+                        {done > 0
+                          ? <>{remaining}<span className="swatch-count-mute"> / {total} left</span></>
                           : <>{total} cells</>
                         }
                       </span>
@@ -1690,10 +2176,26 @@ function App() {
                           <path d="M2 8.5L8.5 2L10 3.5L3.5 10H2V8.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
                         </svg>
                       </button>
+                      <button
+                        className="icon-btn"
+                        title={palette.length <= 2 ? "Need at least 2 colors" : "Delete this color (cells remap to nearest)"}
+                        disabled={palette.length <= 2}
+                        onClick={(e) => { e.stopPropagation(); handleDeletePaletteColor(i); }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                          <path d="M3 3L9 9M9 3L3 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                        </svg>
+                      </button>
                     </div>
                   </div>
                 );
               })}
+              <button className="palette-add" onClick={() => setShowAddPicker(true)}>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M6 2V10M2 6H10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                </svg>
+                Add color
+              </button>
             </div>
           </div>
 
@@ -1733,6 +2235,17 @@ function App() {
         </aside>
       </div>
 
+      {showAddPicker && (
+        <ColorPickerDialog
+          from={[200, 200, 200]}
+          palette={palette}
+          title="Add color"
+          subtitle="Pick a color to add to the palette. No cells will be assigned this color until you recolor them."
+          confirmLabel="Add"
+          onPick={handleAddPaletteColor}
+          onCancel={() => setShowAddPicker(false)}
+        />
+      )}
       {picker && (
         <ColorPickerDialog
           from={palette[picker.fromIndex]}
@@ -1748,9 +2261,21 @@ function App() {
           getProjectSnapshot={getProjectSnapshot}
           onLoad={handleLoadProject}
           onClose={(id, name) => {
-            if (id) { setCurrentProjectId(id); setCurrentProjectName(name); }
+            if (id) {
+              setCurrentProjectId(id);
+              setCurrentProjectName(name);
+              setLastSavedSignature(stateSignature);
+            }
             setShowProjectsDialog(false);
           }}
+        />
+      )}
+      {confirmDialog && (
+        <ConfirmDialog
+          title={confirmDialog.title}
+          message={confirmDialog.message}
+          choices={confirmDialog.choices}
+          onClose={() => setConfirmDialog(null)}
         />
       )}
     </>
